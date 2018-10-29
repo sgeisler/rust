@@ -757,7 +757,7 @@ fn check_matcher_core(sess: &ParseSess,
                 // against SUFFIX
                 continue 'each_token;
             }
-            TokenTree::Sequence(sp, ref seq_rep) => {
+            TokenTree::Sequence(delim_sp, ref seq_rep) => {
                 suffix_first = build_suffix_first();
                 // The trick here: when we check the interior, we want
                 // to include the separator (if any) as a potential
@@ -772,9 +772,96 @@ fn check_matcher_core(sess: &ParseSess,
                 let mut new;
                 let my_suffix = if let Some(ref u) = seq_rep.separator {
                     new = suffix_first.clone();
-                    new.add_one_maybe(TokenTree::Token(sp.entire(), u.clone()));
+                    new.add_one_maybe(TokenTree::Token(delim_sp.entire(), u.clone()));
                     &new
                 } else {
+                    if let (
+                        Some(tok),
+                        Some(TokenTree::MetaVarDecl(sp, name, frag_spec)),
+                     ) = (seq_rep.tts.first(), seq_rep.tts.last()) {
+                        match is_in_follow(tok, &frag_spec.as_str()) {
+                            IsInFollow::Invalid(..) | IsInFollow::Yes => {}  // handled elsewhere
+                            IsInFollow::No(possible) => {
+                                let tok_sp = tok.span();
+                                let next = if *sp == tok_sp {
+                                    "itself".to_owned()
+                                } else {
+                                    format!("`{}`", quoted_tt_to_string(tok))
+                                };
+                                let mut err = sess.span_diagnostic.struct_span_warn(
+                                    *sp,
+                                    &format!(
+                                        "`${name}:{frag}` is followed (through repetition) by \
+                                         {next}, which is not allowed for `{frag}` fragments",
+                                        name=name,
+                                        frag=frag_spec,
+                                        next=next,
+                                    ),
+                                );
+                                if *sp == tok_sp {
+                                    err.span_label(
+                                        *sp,
+                                        "this fragment is followed by itself without a valid \
+                                         separator",
+                                    );
+                                } else {
+                                    err.span_label(
+                                        *sp,
+                                        "this fragment is followed by the first fragment in this \
+                                         repetition without a valid separator",
+                                    );
+                                    err.span_label(
+                                        tok_sp,
+                                        "this is the first fragment in the evaluated repetition",
+                                    );
+                                }
+                                let sugg_span = sess.source_map().next_point(delim_sp.close);
+                                let msg = "allowed there are: ";
+                                let sugg_msg = "add a valid separator for the repetition to be \
+                                                unambiguous";
+                                match &possible[..] {
+                                    &[] => {}
+                                    &[t] => {
+                                        err.note(&format!(
+                                            "only {} is allowed after `{}` fragments",
+                                            t,
+                                            frag_spec,
+                                        ));
+                                        if t.starts_with('`') && t.ends_with('`') {
+                                            err.span_suggestion_with_applicability(
+                                                sugg_span,
+                                                &format!("{}, for example", sugg_msg),
+                                                (&t[1..t.len()-1]).to_owned(),
+                                                Applicability::MaybeIncorrect,
+                                            );
+                                        } else {
+                                            err.note(sugg_msg);
+                                        }
+                                    }
+                                    ts => {
+                                        err.note(&format!(
+                                            "{}{} or {}",
+                                            msg,
+                                            ts[..ts.len() - 1].iter().map(|s| *s)
+                                                .collect::<Vec<_>>().join(", "),
+                                            ts[ts.len() - 1],
+                                        ));
+                                        if ts[0].starts_with('`') && ts[0].ends_with('`') {
+                                            err.span_suggestion_with_applicability(
+                                                sugg_span,
+                                                &format!("{}, for example", sugg_msg),
+                                                (&ts[0][1..ts[0].len()-1]).to_owned(),
+                                                Applicability::MaybeIncorrect,
+                                            );
+                                        } else {
+                                            err.note(sugg_msg);
+                                        }
+                                    }
+                                }
+                                err.emit();
+                            }
+                        }
+                    }
                     &suffix_first
                 };
 
@@ -935,7 +1022,7 @@ fn is_in_follow(tok: &quoted::TokenTree, frag: &str) -> IsInFollow {
                 IsInFollow::Yes
             },
             "stmt" | "expr"  => {
-                let tokens = vec!["`=>`", "`,`", "`;`"];
+                let tokens = vec!["`;`", "`=>`", "`,`"];
                 match *tok {
                     TokenTree::Token(_, ref tok) => match *tok {
                         FatArrow | Comma | Semi => IsInFollow::Yes,
@@ -957,7 +1044,7 @@ fn is_in_follow(tok: &quoted::TokenTree, frag: &str) -> IsInFollow {
             },
             "path" | "ty" => {
                 let tokens = vec![
-                    "`{`", "`[`", "`=>`", "`,`", "`>`","`=`", "`:`", "`;`", "`|`", "`as`",
+                    "`,`", "`{`", "`[`", "`=>`", "`>`","`=`", "`:`", "`;`", "`|`", "`as`",
                     "`where`",
                 ];
                 match *tok {
